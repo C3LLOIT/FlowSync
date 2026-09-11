@@ -85,9 +85,9 @@ def _import_mediapipe():
 
 
 # ── Local imports ─────────────────────────────────────────────────────────────
-from blink_detector import BlinkDetector
-from calibration import CalibrationManager, raw_gaze_point
-from config import (
+from eye_module.blink_detector import BlinkDetector
+from eye_module.calibration import CalibrationManager, raw_gaze_point
+from eye_module.config import (
     CALIBRATION_PATH,
     CAMERA_FPS,
     CAMERA_HEIGHT,
@@ -103,7 +103,7 @@ from config import (
     MOUSE_MOVE_SPEED,
     SCREEN_MARGIN_PX,
 )
-from smoother import EMASmoother
+from eye_module.smoother import EMASmoother
 
 
 # ── Model bootstrapping ───────────────────────────────────────────────────────

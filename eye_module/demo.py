@@ -50,7 +50,7 @@ def main() -> None:
     args = parse_args()
 
     # ── 1. Ensure the MediaPipe model is present ───────────────────────────--
-    from eye_tracker import ensure_model
+    from eye_module.eye_tracker import ensure_model
     ensure_model()
 
     # ── 2. Resolve screen size ─────────────────────────────────────────────--
@@ -65,8 +65,8 @@ def main() -> None:
     log.info("Screen: %d × %d px", screen_w, screen_h)
 
     # ── 3. Build tracker ───────────────────────────────────────────────────--
-    from eye_tracker import EyeTracker
-    import config
+    from eye_module.eye_tracker import EyeTracker
+    from eye_module import config
 
     cam_idx = args.camera if args.camera is not None else config.CAMERA_INDEX
 

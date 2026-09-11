@@ -33,7 +33,7 @@ import math
 import time
 from typing import List, Optional, Tuple
 
-from config import (
+from eye_module.config import (
     BLINK_HOLD_MS,
     DWELL_ENABLED_DEFAULT,
     DWELL_HOLD_MS,

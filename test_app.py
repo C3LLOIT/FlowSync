@@ -209,8 +209,8 @@ class TrackerBridge(QObject):
             from eye_module.preview     import PreviewModule
         except ImportError:
             sys.path.insert(0, str(Path(__file__).parent / "eye_module"))
-            from eye_tracker import EyeTracker, ensure_model
-            from preview     import PreviewModule
+            from eye_module.eye_tracker import EyeTracker, ensure_model
+            from eye_module.preview import PreviewModule
 
         self.sig_status.emit("Checking model …")
         try:

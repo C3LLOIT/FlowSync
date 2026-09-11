@@ -51,7 +51,7 @@ from typing import Callable, List, Optional, Tuple
 import cv2
 import numpy as np
 
-from config import (
+from eye_module.config import (
     CALIBRATION_PATH,
     CALIBRATION_SAMPLES_PER_POINT,
     CALIBRATION_SETTLE_MS,

@@ -20,7 +20,7 @@ does not corrupt the first frame after re-acquisition.
 from __future__ import annotations
 from typing import Optional, Tuple
 
-from config import EMA_ALPHA
+from eye_module.config import EMA_ALPHA
 
 
 class EMASmoother:
