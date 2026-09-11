@@ -1,5 +1,25 @@
+# Virtual environments
 venv311/
+venv/
+.venv/
+
+# Python cache
 __pycache__/
 *.pyc
+*.pyo
+
+# MediaPipe model files (large binaries — download on first run)
 hand_landmarker.task
+eye_module/models/face_landmarker.task
+
+# Calibration data (user-specific, not committed)
+eye_module/calibration/calibration.json
+
+# Environment / secrets
 .env
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
