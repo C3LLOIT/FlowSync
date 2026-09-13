@@ -38,6 +38,52 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal, QObject, QTimer, QDateTime
 from PySide6.QtGui import QColor, QPalette, QPixmap, QImage
 
+
+# ── Screen size helper (autopy optional) ─────────────────────────────────────
+def _get_screen_size():
+    """
+    Return (width, height) of the primary screen.
+    Tries autopy first, then PySide6, then tkinter, then a safe default.
+    Returns (0, 0) only if all methods fail.
+    """
+    # 1. autopy
+    try:
+        import autopy
+        sw, sh = autopy.screen.size()
+        return int(sw), int(sh)
+    except Exception:
+        pass
+
+    # 2. PySide6 QApplication (already a hard dependency)
+    try:
+        from PySide6.QtWidgets import QApplication
+        import sys
+        app = QApplication.instance() or QApplication(sys.argv)
+        screen = app.primaryScreen()
+        if screen:
+            s = screen.size()
+            return s.width(), s.height()
+    except Exception:
+        pass
+
+    # 3. tkinter (stdlib)
+    try:
+        import tkinter as tk
+        root = tk.Tk()
+        root.withdraw()
+        w, h = root.winfo_screenwidth(), root.winfo_screenheight()
+        root.destroy()
+        return w, h
+    except Exception:
+        pass
+
+    # 4. Safe fallback — common 1080p
+    import logging
+    logging.getLogger(__name__).warning(
+        "Could not detect screen size — defaulting to 1920x1080."
+    )
+    return 1920, 1080
+
 # ╔══════════════════════════════════════════════════════════════════════╗
 # ║  PALETTE & STYLE                                                     ║
 # ╚══════════════════════════════════════════════════════════════════════╝
@@ -219,12 +265,12 @@ class TrackerBridge(QObject):
             self.sig_error.emit(str(exc))
             return False
 
-        try:
-            import autopy
-            sw, sh = autopy.screen.size()
-            screen_w, screen_h = int(sw), int(sh)
-        except Exception as exc:
-            self.sig_error.emit(f"Cannot read screen size: {exc}")
+        screen_w, screen_h = _get_screen_size()
+        if screen_w == 0:
+            self.sig_error.emit(
+                "Cannot determine screen size. "
+                "Install autopy (pip install autopy) or ensure PySide6 is available."
+            )
             return False
 
         self._preview = PreviewModule(mode="eye", mirror=True)
@@ -272,12 +318,8 @@ class TrackerBridge(QObject):
             preview = bridge._preview
 
             # Replicate the original loop but emit frames to the bridge
-            autopy_mod = None
-            try:
-                import autopy
-                autopy_mod = autopy
-            except ImportError:
-                pass
+            from eye_module.eye_tracker import _import_autopy
+            autopy_mod = _import_autopy()  # None if not installed
 
             cap        = tracker._open_camera()
             landmarker = tracker._build_landmarker(mp_mod, mode="video")

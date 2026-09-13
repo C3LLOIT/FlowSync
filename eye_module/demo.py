@@ -46,6 +46,26 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+
+def _get_screen_size():
+    """Return (width, height) of the primary screen with autopy optional."""
+    try:
+        import autopy
+        sw, sh = autopy.screen.size()
+        return int(sw), int(sh)
+    except Exception:
+        pass
+    try:
+        import tkinter as tk
+        root = tk.Tk(); root.withdraw()
+        w, h = root.winfo_screenwidth(), root.winfo_screenheight()
+        root.destroy(); return w, h
+    except Exception:
+        pass
+    log.warning("Cannot detect screen size — defaulting to 1920x1080")
+    return 1920, 1080
+
+
 def main() -> None:
     args = parse_args()
 
@@ -54,14 +74,7 @@ def main() -> None:
     ensure_model()
 
     # ── 2. Resolve screen size ─────────────────────────────────────────────--
-    try:
-        import autopy
-        sw, sh = autopy.screen.size()
-        screen_w, screen_h = int(sw), int(sh)
-    except Exception as exc:
-        log.error("Could not read screen size via autopy: %s", exc)
-        sys.exit(1)
-
+    screen_w, screen_h = _get_screen_size()
     log.info("Screen: %d × %d px", screen_w, screen_h)
 
     # ── 3. Build tracker ───────────────────────────────────────────────────--
