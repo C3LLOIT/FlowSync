@@ -46,7 +46,7 @@ def run():
 
         # Process detected landmarks
         processed_landmarks = process_landmarks(result)
-
+        
         # Process each detected hand
         for hand in processed_landmarks:
 
