@@ -3,17 +3,10 @@ test_app.py
 ───────────
 PySide6 test application for the eye_module.
 
-What's new vs the original:
-  - Preview panel (live camera feed with overlays) in the right column
-  - Preview toggle button (off by default)
-  - Calibration state card — shows "Waiting", "Stable", "Sampling" in real time
-  - TrackerBridge now exposes sig_preview_frame and sig_cal_state signals
-  - EyeTracker result is forwarded to PreviewModule every frame
-
 Place this file one level above eye_module/:
 
     project/
-    ├── test_app.py          ← this file
+    ├── test_app.py
     └── eye_module/
         ├── eye_tracker.py
         └── ...
@@ -27,42 +20,60 @@ from __future__ import annotations
 import sys
 import threading
 from pathlib import Path
+from typing import TYPE_CHECKING, Optional
+
+import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QPushButton, QFrame, QScrollArea, QSizePolicy,
-    QGroupBox, QSlider, QStackedWidget,
+    QLabel, QPushButton, QFrame, QScrollArea,
+    QGroupBox, QSlider,
 )
-from PySide6.QtCore import Qt, Signal, QObject, QTimer, QDateTime
-from PySide6.QtGui import QColor, QPalette, QPixmap, QImage
+from PySide6.QtCore import (
+    Qt, Signal, QObject, QTimer, QDateTime,
+)
+from PySide6.QtGui import (
+    QColor, QPalette, QPixmap, QImage,
+    QPainter,
+)
+
+# PySide6 6.x scoped enums — imported explicitly so Pyright resolves them.
+from PySide6.QtCore import Qt as _Qt
+from PySide6.QtGui  import QPainter as _QPainter, QPalette as _QPalette
+from PySide6.QtWidgets import QFrame as _QFrame
+
+# TYPE_CHECKING-only import for EyeTracker — avoids runtime circular import
+# and satisfies Pyright's attribute checks on self._tracker.
+if TYPE_CHECKING:
+    from eye_module.eye_tracker import EyeTracker
+    from eye_module.preview     import PreviewModule
 
 
-# ── Screen size helper (autopy optional) ─────────────────────────────────────
-def _get_screen_size():
+# ── Screen size helper ────────────────────────────────────────────────────────
+
+def _get_screen_size() -> tuple[int, int]:
     """
     Return (width, height) of the primary screen.
-    Tries autopy first, then PySide6, then tkinter, then a safe default.
-    Returns (0, 0) only if all methods fail.
+    Tries autopy → PySide6 QScreen → tkinter → 1920×1080 fallback.
     """
     # 1. autopy
     try:
-        import autopy
+        import autopy  # type: ignore[import]
         sw, sh = autopy.screen.size()
         return int(sw), int(sh)
     except Exception:
         pass
 
-    # 2. PySide6 QApplication (already a hard dependency)
+    # 2. PySide6 QApplication (already a hard dep — safe to use here)
     try:
-        from PySide6.QtWidgets import QApplication
-        import sys
-        app = QApplication.instance() or QApplication(sys.argv)
-        screen = app.primaryScreen()
-        if screen:
-            s = screen.size()
-            return s.width(), s.height()
+        app = QApplication.instance()
+        if isinstance(app, QApplication):
+            screen = app.primaryScreen()
+            if screen is not None:
+                s = screen.size()
+                return s.width(), s.height()
     except Exception:
         pass
 
@@ -77,18 +88,19 @@ def _get_screen_size():
     except Exception:
         pass
 
-    # 4. Safe fallback — common 1080p
+    # 4. Safe fallback
     import logging
     logging.getLogger(__name__).warning(
-        "Could not detect screen size — defaulting to 1920x1080."
+        "Could not detect screen size — defaulting to 1920×1080."
     )
     return 1920, 1080
+
 
 # ╔══════════════════════════════════════════════════════════════════════╗
 # ║  PALETTE & STYLE                                                     ║
 # ╚══════════════════════════════════════════════════════════════════════╝
 
-DARK = {
+DARK: dict[str, str] = {
     "bg":         "#0f1117",
     "surface":    "#1a1d27",
     "surface2":   "#22263a",
@@ -231,32 +243,27 @@ class TrackerBridge(QObject):
     cross to the Qt main thread automatically.
     """
 
-    sig_move          = Signal(float, float)   # smoothed cursor x, y
+    sig_move          = Signal(float, float)
     sig_blink_click   = Signal()
     sig_dwell_click   = Signal()
     sig_face_found    = Signal()
     sig_face_lost     = Signal()
     sig_error         = Signal(str)
     sig_status        = Signal(str)
-    sig_preview_frame = Signal(object)         # numpy BGR frame for the preview panel
-    sig_cal_state     = Signal(str)            # "waiting" | "stable" | "sampling" | ""
+    sig_preview_frame = Signal(object)   # numpy BGR frame
+    sig_cal_state     = Signal(str)      # "waiting"|"stable"|"sampling"|""
 
-    def __init__(self, parent: QObject | None = None) -> None:
+    def __init__(self, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
-        self._tracker  = None
-        self._preview  = None          # PreviewModule instance
-        self._last_result = None       # latest MediaPipe result for preview
+        # Typed as Optional; assigned in _build() before any access.
+        self._tracker: Optional[EyeTracker]  = None
+        self._preview: Optional[PreviewModule] = None
 
     # ── Internal build ────────────────────────────────────────────────
 
     def _build(self) -> bool:
-        try:
-            from eye_module.eye_tracker import EyeTracker, ensure_model
-            from eye_module.preview     import PreviewModule
-        except ImportError:
-            sys.path.insert(0, str(Path(__file__).parent / "eye_module"))
-            from eye_module.eye_tracker import EyeTracker, ensure_model
-            from eye_module.preview import PreviewModule
+        from eye_module.eye_tracker import EyeTracker, ensure_model
+        from eye_module.preview     import PreviewModule
 
         self.sig_status.emit("Checking model …")
         try:
@@ -266,24 +273,13 @@ class TrackerBridge(QObject):
             return False
 
         screen_w, screen_h = _get_screen_size()
-        if screen_w == 0:
-            self.sig_error.emit(
-                "Cannot determine screen size. "
-                "Install autopy (pip install autopy) or ensure PySide6 is available."
-            )
-            return False
 
         self._preview = PreviewModule(mode="eye", mirror=True)
-
         self._tracker = EyeTracker(
             screen_w=screen_w,
             screen_h=screen_h,
             load_calibration=True,
         )
-
-        # Patch the tracker's _tracking_loop to also forward results
-        # to the preview every frame — done via the on_move callback
-        # (fires after every successful detection + move).
         self._tracker.on_move        = self._on_tracker_move
         self._tracker.on_blink_click = self.sig_blink_click.emit
         self._tracker.on_dwell_click = self.sig_dwell_click.emit
@@ -291,65 +287,51 @@ class TrackerBridge(QObject):
         self._tracker.on_face_lost   = self._on_face_lost
         self._tracker.on_error       = lambda e: self.sig_error.emit(str(e))
 
-        # Monkey-patch the tracker to expose its latest frame + result
-        # so we can forward them to the preview panel.
         self._patch_tracker_for_preview()
         return True
 
     def _patch_tracker_for_preview(self) -> None:
-        """
-        Intercept _tracking_loop to capture each raw frame and
-        MediaPipe result, render the preview, and emit sig_preview_frame.
+        """Replace the tracker's _tracking_loop to also emit preview frames."""
+        # Guaranteed non-None — called only from _build after assignment.
+        assert self._tracker is not None
+        assert self._preview is not None
 
-        We do this by wrapping the tracker's internal loop step rather
-        than modifying eye_tracker.py itself — keeping the module clean.
-        """
-        bridge = self
+        bridge  = self
+        tracker = self._tracker
+        preview = self._preview
 
-        original_loop = self._tracker._tracking_loop
-
-        def patched_loop():
-            """Runs on the background thread — same as the original loop."""
-            import mediapipe as mp
+        def patched_loop() -> None:
             import cv2
+            import mediapipe as mp
 
-            mp_mod  = mp
-            tracker = bridge._tracker
-            preview = bridge._preview
-
-            # Replicate the original loop but emit frames to the bridge
             from eye_module.eye_tracker import _import_autopy
-            autopy_mod = _import_autopy()  # None if not installed
+            from eye_module.calibration import raw_gaze_point
+            from eye_module.config      import SCREEN_MARGIN_PX
+
+            autopy_mod = _import_autopy()   # None if not installed
 
             cap        = tracker._open_camera()
-            landmarker = tracker._build_landmarker(mp_mod, mode="video")
+            landmarker = tracker._build_landmarker(mp, mode="video")
 
-            frame_index    = 0
             face_was_visible = False
-            fps_hint       = int(cap.get(cv2.CAP_PROP_FPS) or 30)
-            frame_ts_ms    = 0
-
-            from eye_module.calibration import raw_gaze_point
-            from eye_module.config import SCREEN_MARGIN_PX
+            fps_hint:  int = int(cap.get(cv2.CAP_PROP_FPS) or 30)
+            frame_ts_ms: int = 0
 
             try:
                 while not tracker._stop_event.is_set():
                     ret, frame = cap.read()
                     if not ret:
-                        import time; time.sleep(0.05)
+                        import time
+                        time.sleep(0.05)
                         continue
 
-                    frame_index  += 1
-                    frame_ts_ms  += max(1, 1000 // fps_hint)
-
-                    import cv2 as _cv2
-                    rgb = _cv2.cvtColor(frame, _cv2.COLOR_BGR2RGB)
-                    mp_image = mp_mod.Image(
-                        image_format=mp_mod.ImageFormat.SRGB, data=rgb
+                    frame_ts_ms += max(1, 1000 // fps_hint)
+                    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    mp_image = mp.Image(
+                        image_format=mp.ImageFormat.SRGB, data=rgb
                     )
                     result = landmarker.detect_for_video(mp_image, frame_ts_ms)
 
-                    # ── Emit preview frame ────────────────────────────────
                     rendered = preview.render(frame, result)
                     bridge.sig_preview_frame.emit(rendered)
 
@@ -366,16 +348,16 @@ class TrackerBridge(QObject):
                         tracker._fire(tracker.on_face_found)
 
                     lms = result.face_landmarks[0]
-                    raw_x, raw_y = raw_gaze_point(lms)
+                    raw_x, raw_y       = raw_gaze_point(lms)
                     screen_x, screen_y = tracker._calibration.map(raw_x, raw_y)
-                    sx, sy = tracker._smoother.update(screen_x, screen_y)
+                    sx, sy             = tracker._smoother.update(screen_x, screen_y)
 
                     sx = max(SCREEN_MARGIN_PX,
                              min(tracker._screen_w - SCREEN_MARGIN_PX, sx))
                     sy = max(SCREEN_MARGIN_PX,
                              min(tracker._screen_h - SCREEN_MARGIN_PX, sy))
 
-                    if autopy_mod:
+                    if autopy_mod is not None:
                         try:
                             autopy_mod.mouse.move(sx, sy)
                         except Exception:
@@ -394,7 +376,7 @@ class TrackerBridge(QObject):
                 landmarker.close()
                 cap.release()
 
-        self._tracker._tracking_loop = patched_loop
+        tracker._tracking_loop = patched_loop  # type: ignore[method-assign]
 
     # ── Control API ───────────────────────────────────────────────────
 
@@ -402,46 +384,37 @@ class TrackerBridge(QObject):
         if self._tracker is None:
             if not self._build():
                 return
+        assert self._tracker is not None
         self._tracker.start()
         self.sig_status.emit("Tracking active")
 
     def stop(self) -> None:
-        if self._tracker and self._tracker.is_running:
+        if self._tracker is not None and self._tracker.is_running:
             self._tracker.stop()
         self.sig_status.emit("Stopped")
 
     def run_calibration(self) -> None:
-        """Called from a worker thread (not the Qt thread)."""
+        """Called from a worker thread."""
         if self._tracker is None:
             if not self._build():
                 return
+        assert self._tracker is not None
 
         import cv2
-        cap = self._tracker._open_camera()
-
         import mediapipe as mp
+
+        cap        = self._tracker._open_camera()
         landmarker = self._tracker._build_landmarker(mp, mode="video")
 
         self.sig_status.emit("Running calibration …")
 
-        # Wire calibration state → sig_cal_state so the UI updates
-        # We'll pass a frame_callback that also updates preview
-        def frame_cb(annotated_frame):
+        def frame_cb(annotated_frame: np.ndarray) -> None:
             self.sig_preview_frame.emit(annotated_frame)
 
-        # Patch calibration to also emit cal_state signals
-        cal = self._tracker._calibration
-        original_run = cal.run
-
-        bridge = self
-
-        def instrumented_run(lm, cap_, fc=None):
-            # We intercept by reimporting and calling the fixed version
-            # with our frame_callback
-            return original_run(lm, cap_, frame_callback=frame_cb)
-
         try:
-            ok = instrumented_run(landmarker, cap)
+            ok = self._tracker._calibration.run(
+                landmarker, cap, frame_callback=frame_cb
+            )
         finally:
             landmarker.close()
             cap.release()
@@ -453,24 +426,24 @@ class TrackerBridge(QObject):
             self.sig_status.emit("Calibration aborted")
 
     def set_preview_enabled(self, enabled: bool) -> None:
-        if self._preview:
+        if self._preview is not None:
             self._preview.enabled = enabled
 
     def set_dwell_enabled(self, enabled: bool) -> None:
-        if self._tracker:
+        if self._tracker is not None:
             self._tracker.dwell_enabled = enabled
 
     def set_ema_alpha(self, alpha: float) -> None:
-        if self._tracker:
+        if self._tracker is not None:
             self._tracker._smoother.alpha = alpha
 
     @property
     def is_running(self) -> bool:
-        return bool(self._tracker and self._tracker.is_running)
+        return self._tracker is not None and self._tracker.is_running
 
     @property
     def is_calibrated(self) -> bool:
-        return bool(self._tracker and self._tracker.is_calibrated)
+        return self._tracker is not None and self._tracker.is_calibrated
 
     # ── Internal callbacks (tracker thread) ──────────────────────────
 
@@ -485,13 +458,14 @@ class TrackerBridge(QObject):
 # ║  WIDGETS                                                             ║
 # ╚══════════════════════════════════════════════════════════════════════╝
 
-def _panel(parent=None) -> QFrame:
+def _panel(parent: Optional[QWidget] = None) -> QFrame:
     f = QFrame(parent)
     f.setObjectName("panel")
     return f
 
 
-def _label(text: str, obj_name: str = "", parent=None) -> QLabel:
+def _label(text: str, obj_name: str = "",
+           parent: Optional[QWidget] = None) -> QLabel:
     lbl = QLabel(text, parent)
     if obj_name:
         lbl.setObjectName(obj_name)
@@ -499,7 +473,7 @@ def _label(text: str, obj_name: str = "", parent=None) -> QLabel:
 
 
 class StatusDot(QWidget):
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setFixedSize(10, 10)
         self._color = QColor(DARK["text_muted"])
@@ -508,17 +482,17 @@ class StatusDot(QWidget):
         self._color = QColor(hex_color)
         self.update()
 
-    def paintEvent(self, event):
-        from PySide6.QtGui import QPainter
+    def paintEvent(self, event: object) -> None:  # type: ignore[override]
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setBrush(self._color)
-        p.setPen(Qt.NoPen)
+        p.setPen(Qt.PenStyle.NoPen)
         p.drawEllipse(0, 0, self.width(), self.height())
 
 
 class StatCard(QFrame):
-    def __init__(self, title: str, initial: str = "—", parent=None) -> None:
+    def __init__(self, title: str, initial: str = "—",
+                 parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setObjectName("panel")
         lay = QVBoxLayout(self)
@@ -534,16 +508,10 @@ class StatCard(QFrame):
 
 
 class PreviewPanel(QFrame):
-    """
-    Embedded camera preview panel.
-    Displays the rendered numpy frame from PreviewModule as a QPixmap.
-    Shows a placeholder when preview is disabled.
-    """
-
     PREVIEW_W = 320
     PREVIEW_H = 240
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setObjectName("panel")
         self.setFixedSize(self.PREVIEW_W, self.PREVIEW_H + 36)
@@ -558,7 +526,7 @@ class PreviewPanel(QFrame):
         header.setStyleSheet(
             f"background: {DARK['surface2']};"
             f"border-bottom: 1px solid {DARK['border']};"
-            f"border-radius: 0px;"
+            "border-radius: 0px;"
         )
         h_lay = QHBoxLayout(header)
         h_lay.setContentsMargins(10, 0, 10, 0)
@@ -574,44 +542,40 @@ class PreviewPanel(QFrame):
         # Image label
         self._image_label = QLabel()
         self._image_label.setFixedSize(self.PREVIEW_W, self.PREVIEW_H)
-        self._image_label.setAlignment(Qt.AlignCenter)
+        self._image_label.setAlignment(
+            Qt.AlignmentFlag.AlignCenter
+        )
         self._image_label.setStyleSheet(f"background: {DARK['bg']};")
         lay.addWidget(self._image_label)
 
         self._show_placeholder()
 
-    def update_frame(self, bgr_frame) -> None:
-        """Receive a BGR numpy frame and display it."""
-        import numpy as np
+    def update_frame(self, bgr_frame: np.ndarray) -> None:
         import cv2
-        # Resize to fit panel
         resized = cv2.resize(bgr_frame, (self.PREVIEW_W, self.PREVIEW_H))
-        rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+        rgb     = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
-        img = QImage(rgb.data.tobytes(), w, h, ch * w, QImage.Format.Format_RGB888)
+        img = QImage(rgb.data.tobytes(), w, h, ch * w,
+                     QImage.Format.Format_RGB888)
         self._image_label.setPixmap(QPixmap.fromImage(img))
 
     def set_cal_state(self, state: str) -> None:
-        """Update the calibration phase badge in the header."""
-        labels = {
-            "waiting":  ("Hold still …",    DARK["amber"]),
-            "stable":   ("Gaze stable",      DARK["green"]),
-            "sampling": ("Sampling …",       DARK["accent"]),
-            "":         ("",                 ""),
+        labels: dict[str, tuple[str, str]] = {
+            "waiting":  ("Hold still …",  DARK["amber"]),
+            "stable":   ("Gaze stable",   DARK["green"]),
+            "sampling": ("Sampling …",    DARK["accent"]),
+            "":         ("",              ""),
         }
         text, color = labels.get(state, ("", ""))
         self._cal_badge.setText(text)
-        if color:
-            self._cal_badge.setStyleSheet(
-                f"font-size: 10px; font-weight: 600; color: {color};"
-            )
-        else:
-            self._cal_badge.setStyleSheet("")
+        self._cal_badge.setStyleSheet(
+            f"font-size: 10px; font-weight: 600; color: {color};"
+            if color else ""
+        )
 
     def _show_placeholder(self) -> None:
-        import numpy as np
         import cv2
-        ph = np.zeros((self.PREVIEW_H, self.PREVIEW_W, 3), dtype="uint8")
+        ph = np.zeros((self.PREVIEW_H, self.PREVIEW_W, 3), dtype=np.uint8)
         ph[:] = (20, 22, 30)
         msg = "Preview off"
         (tw, th), _ = cv2.getTextSize(msg, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
@@ -622,29 +586,32 @@ class PreviewPanel(QFrame):
         )
         rgb = cv2.cvtColor(ph, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
-        img = QImage(rgb.data.tobytes(), w, h, ch * w, QImage.Format.Format_RGB888)
+        img = QImage(rgb.data.tobytes(), w, h, ch * w,
+                     QImage.Format.Format_RGB888)
         self._image_label.setPixmap(QPixmap.fromImage(img))
 
 
 class EventLog(QWidget):
     MAX_LINES = 120
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
 
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
-        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-
+        self._scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
         self._container = QWidget()
-        self._container.setStyleSheet(f"background-color: {DARK['surface']};")
+        self._container.setStyleSheet(
+            f"background-color: {DARK['surface']};"
+        )
         self._lay = QVBoxLayout(self._container)
         self._lay.setContentsMargins(12, 8, 12, 8)
         self._lay.setSpacing(1)
         self._lay.addStretch()
-
         self._scroll.setWidget(self._container)
         outer.addWidget(self._scroll)
         self._lines: list[QLabel] = []
@@ -658,12 +625,8 @@ class EventLog(QWidget):
         self._lines.append(lbl)
         if len(self._lines) > self.MAX_LINES:
             self._lines.pop(0).deleteLater()
-        QTimer.singleShot(
-            10,
-            lambda: self._scroll.verticalScrollBar().setValue(
-                self._scroll.verticalScrollBar().maximum()
-            ),
-        )
+        sb = self._scroll.verticalScrollBar()
+        QTimer.singleShot(10, lambda: sb.setValue(sb.maximum()))
 
 
 # ╔══════════════════════════════════════════════════════════════════════╗
@@ -678,10 +641,11 @@ class MainWindow(QMainWindow):
         self.resize(1060, 700)
         self.setMinimumSize(900, 580)
 
-        self._bridge       = TrackerBridge(self)
-        self._click_count  = 0
-        self._dwell_count  = 0
-        self._preview_on   = False
+        self._bridge      = TrackerBridge(self)
+        self._click_count = 0
+        self._dwell_count = 0
+        self._preview_on  = False
+        self._pending_frame: Optional[np.ndarray] = None
 
         self._build_ui()
         self._connect_signals()
@@ -691,14 +655,12 @@ class MainWindow(QMainWindow):
         self._pulse_timer.timeout.connect(self._pulse_dot)
         self._pulse_state = False
 
-        # Frame-rate limiter for preview — update at most 30fps in the UI
-        self._pending_frame = None
         self._frame_timer = QTimer(self)
         self._frame_timer.setInterval(33)   # ~30 fps
         self._frame_timer.timeout.connect(self._flush_preview_frame)
         self._frame_timer.start()
 
-    # ── UI ────────────────────────────────────────────────────────────
+    # ── UI construction ───────────────────────────────────────────────
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -707,7 +669,6 @@ class MainWindow(QMainWindow):
         root_lay.setContentsMargins(16, 14, 16, 14)
         root_lay.setSpacing(12)
         root_lay.addWidget(self._make_header())
-
         body = QHBoxLayout()
         body.setSpacing(12)
         body.addLayout(self._make_left_column(),  stretch=0)
@@ -718,15 +679,13 @@ class MainWindow(QMainWindow):
         frame = _panel()
         lay   = QHBoxLayout(frame)
         lay.setContentsMargins(16, 10, 16, 10)
-
         title = QLabel("Eye Module  ·  Test Bench")
         title.setStyleSheet(
             f"font-size: 15px; font-weight: 700; color: {DARK['text']};"
         )
         lay.addWidget(title)
         lay.addStretch()
-
-        self._dot          = StatusDot()
+        self._dot = StatusDot()
         self._status_label = QLabel("Idle")
         self._status_label.setStyleSheet(
             f"color: {DARK['text_dim']}; font-size: 12px;"
@@ -741,18 +700,16 @@ class MainWindow(QMainWindow):
         col.setSpacing(12)
 
         # Controls
-        ctrl = QGroupBox("Controls")
+        ctrl     = QGroupBox("Controls")
         ctrl_lay = QVBoxLayout(ctrl)
         ctrl_lay.setSpacing(8)
         ctrl_lay.setContentsMargins(12, 16, 12, 12)
 
         self._btn_start = QPushButton("Start Tracking")
         self._btn_start.setObjectName("btn_primary")
-
-        self._btn_stop = QPushButton("Stop Tracking")
+        self._btn_stop  = QPushButton("Stop Tracking")
         self._btn_stop.setObjectName("btn_danger")
         self._btn_stop.setEnabled(False)
-
         self._btn_calibrate = QPushButton("Run Calibration")
 
         ctrl_lay.addWidget(self._btn_start)
@@ -760,7 +717,7 @@ class MainWindow(QMainWindow):
         ctrl_lay.addWidget(self._btn_calibrate)
 
         # Options
-        opts = QGroupBox("Options")
+        opts     = QGroupBox("Options")
         opts_lay = QVBoxLayout(opts)
         opts_lay.setSpacing(10)
         opts_lay.setContentsMargins(12, 16, 12, 12)
@@ -781,7 +738,6 @@ class MainWindow(QMainWindow):
         prev_row.addStretch()
         prev_row.addWidget(self._btn_preview)
         opts_lay.addLayout(prev_row)
-
         self._div(opts_lay)
 
         # Dwell toggle
@@ -800,19 +756,20 @@ class MainWindow(QMainWindow):
         dwell_row.addStretch()
         dwell_row.addWidget(self._btn_dwell)
         opts_lay.addLayout(dwell_row)
-
         self._div(opts_lay)
 
-        # EMA alpha
+        # EMA alpha slider
         alpha_lbl = QLabel("Smoothing (EMA α)")
         alpha_lbl.setStyleSheet(f"color: {DARK['text_dim']};")
         alpha_row = QHBoxLayout()
-        self._alpha_slider = QSlider(Qt.Horizontal)
+        self._alpha_slider = QSlider(Qt.Orientation.Horizontal)
         self._alpha_slider.setRange(5, 80)
         self._alpha_slider.setValue(25)
         self._alpha_label = QLabel("0.25")
         self._alpha_label.setFixedWidth(34)
-        self._alpha_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self._alpha_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
         self._alpha_label.setStyleSheet(
             f"color: {DARK['accent']}; font-family: monospace;"
         )
@@ -830,27 +787,25 @@ class MainWindow(QMainWindow):
         col = QVBoxLayout()
         col.setSpacing(12)
 
-        # ── Top row: stat cards + preview panel ───────────────────────
         top_row = QHBoxLayout()
         top_row.setSpacing(12)
 
-        # Stat cards (vertical stack on the left of the top row)
         cards_col = QVBoxLayout()
         cards_col.setSpacing(8)
 
         row1 = QHBoxLayout()
         row1.setSpacing(8)
-        self._card_pos    = StatCard("Cursor Position", "—, —")
-        self._card_face   = StatCard("Face", "Not detected")
-        self._card_calib  = StatCard("Calibration", "None")
+        self._card_pos      = StatCard("Cursor Position", "—, —")
+        self._card_face     = StatCard("Face", "Not detected")
+        self._card_calib    = StatCard("Calibration", "None")
         row1.addWidget(self._card_pos)
         row1.addWidget(self._card_face)
         row1.addWidget(self._card_calib)
 
         row2 = QHBoxLayout()
         row2.setSpacing(8)
-        self._card_clicks  = StatCard("Blink Clicks", "0")
-        self._card_dwell_c = StatCard("Dwell Clicks", "0")
+        self._card_clicks   = StatCard("Blink Clicks", "0")
+        self._card_dwell_c  = StatCard("Dwell Clicks", "0")
         self._card_calstate = StatCard("Cal. State", "—")
         row2.addWidget(self._card_clicks)
         row2.addWidget(self._card_dwell_c)
@@ -858,29 +813,24 @@ class MainWindow(QMainWindow):
 
         cards_col.addLayout(row1)
         cards_col.addLayout(row2)
-
         top_row.addLayout(cards_col, stretch=1)
 
-        # Preview panel (right side of top row)
         self._preview_panel = PreviewPanel()
         top_row.addWidget(self._preview_panel, stretch=0)
-
         col.addLayout(top_row)
 
-        # ── Event log ─────────────────────────────────────────────────
         log_group = QGroupBox("Event Log")
         log_lay   = QVBoxLayout(log_group)
         log_lay.setContentsMargins(4, 12, 4, 4)
-
         self._log = EventLog()
         self._log.setMinimumHeight(260)
         log_lay.addWidget(self._log)
-
         btn_clear = QPushButton("Clear log")
         btn_clear.setFixedWidth(90)
         btn_clear.clicked.connect(self._clear_log)
-        log_lay.addWidget(btn_clear, alignment=Qt.AlignRight)
-
+        log_lay.addWidget(
+            btn_clear, alignment=Qt.AlignmentFlag.AlignRight
+        )
         col.addWidget(log_group)
         return col
 
@@ -964,12 +914,16 @@ class MainWindow(QMainWindow):
     def _on_blink_click(self) -> None:
         self._click_count += 1
         self._card_clicks.set_value(str(self._click_count))
-        self._log.append(f"🖱  Blink-click  #{self._click_count}", DARK["accent"])
+        self._log.append(
+            f"🖱  Blink-click  #{self._click_count}", DARK["accent"]
+        )
 
     def _on_dwell_click(self) -> None:
         self._dwell_count += 1
         self._card_dwell_c.set_value(str(self._dwell_count))
-        self._log.append(f"🕐  Dwell-click  #{self._dwell_count}", DARK["green"])
+        self._log.append(
+            f"🕐  Dwell-click  #{self._dwell_count}", DARK["green"]
+        )
 
     def _on_face_found(self) -> None:
         self._card_face.set_value("Detected ✓")
@@ -990,26 +944,23 @@ class MainWindow(QMainWindow):
         if "complete" in msg.lower() or self._bridge.is_calibrated:
             self._card_calib.set_value("Loaded ✓")
 
-    def _on_preview_frame(self, frame) -> None:
-        """Store the latest frame — the timer flushes it at 30fps."""
+    def _on_preview_frame(self, frame: np.ndarray) -> None:
         if self._preview_on:
             self._pending_frame = frame
 
     def _flush_preview_frame(self) -> None:
-        """Called by _frame_timer — pushes latest frame to the panel."""
         if self._pending_frame is not None and self._preview_on:
             self._preview_panel.update_frame(self._pending_frame)
             self._pending_frame = None
 
     def _on_cal_state(self, state: str) -> None:
-        """Update the calibration state card and preview badge."""
-        labels = {
+        labels: dict[str, str] = {
             "waiting":  "Waiting",
             "stable":   "Stable ✓",
             "sampling": "Sampling …",
             "":         "—",
         }
-        colors = {
+        colors: dict[str, str] = {
             "waiting":  DARK["amber"],
             "stable":   DARK["green"],
             "sampling": DARK["accent"],
@@ -1017,7 +968,8 @@ class MainWindow(QMainWindow):
         }
         self._card_calstate.set_value(labels.get(state, "—"))
         self._card_calstate._value.setStyleSheet(
-            f"font-size: 20px; font-weight: 700; color: {colors.get(state, DARK['text'])};"
+            f"font-size: 20px; font-weight: 700; "
+            f"color: {colors.get(state, DARK['text'])};"
         )
         self._preview_panel.set_cal_state(state)
 
@@ -1025,8 +977,9 @@ class MainWindow(QMainWindow):
 
     def _set_status(self, text: str, color: str = "") -> None:
         self._status_label.setText(text)
-        col = color or DARK["text_dim"]
-        self._status_label.setStyleSheet(f"color: {col}; font-size: 12px;")
+        self._status_label.setStyleSheet(
+            f"color: {color or DARK['text_dim']}; font-size: 12px;"
+        )
 
     def _pulse_dot(self) -> None:
         self._pulse_state = not self._pulse_state
@@ -1039,17 +992,17 @@ class MainWindow(QMainWindow):
             lbl.deleteLater()
         self._log._lines.clear()
 
-    def _div(self, layout) -> None:
-        """Thin horizontal divider line."""
+    def _div(self, layout: QVBoxLayout) -> None:
         line = QFrame()
-        line.setFrameShape(QFrame.HLine)
+        line.setFrameShape(QFrame.Shape.HLine)
         line.setStyleSheet(f"color: {DARK['border']}; margin: 2px 0;")
         layout.addWidget(line)
 
-    def closeEvent(self, event) -> None:
+    def closeEvent(self, event: object) -> None:  # type: ignore[override]
         self._frame_timer.stop()
         self._bridge.stop()
-        event.accept()
+        if hasattr(event, "accept"):
+            event.accept()  # type: ignore[union-attr]
 
 
 # ╔══════════════════════════════════════════════════════════════════════╗
@@ -1064,15 +1017,16 @@ def main() -> None:
     app.setStyleSheet(STYLESHEET)
 
     palette = app.palette()
-    palette.setColor(QPalette.Window,          QColor(DARK["bg"]))
-    palette.setColor(QPalette.WindowText,      QColor(DARK["text"]))
-    palette.setColor(QPalette.Base,            QColor(DARK["surface"]))
-    palette.setColor(QPalette.AlternateBase,   QColor(DARK["surface2"]))
-    palette.setColor(QPalette.Text,            QColor(DARK["text"]))
-    palette.setColor(QPalette.Button,          QColor(DARK["surface2"]))
-    palette.setColor(QPalette.ButtonText,      QColor(DARK["text"]))
-    palette.setColor(QPalette.Highlight,       QColor(DARK["accent"]))
-    palette.setColor(QPalette.HighlightedText, QColor("#ffffff"))
+    cr = QPalette.ColorRole
+    palette.setColor(cr.Window,          QColor(DARK["bg"]))
+    palette.setColor(cr.WindowText,      QColor(DARK["text"]))
+    palette.setColor(cr.Base,            QColor(DARK["surface"]))
+    palette.setColor(cr.AlternateBase,   QColor(DARK["surface2"]))
+    palette.setColor(cr.Text,            QColor(DARK["text"]))
+    palette.setColor(cr.Button,          QColor(DARK["surface2"]))
+    palette.setColor(cr.ButtonText,      QColor(DARK["text"]))
+    palette.setColor(cr.Highlight,       QColor(DARK["accent"]))
+    palette.setColor(cr.HighlightedText, QColor("#ffffff"))
     app.setPalette(palette)
 
     win = MainWindow()

@@ -18,6 +18,7 @@ does not corrupt the first frame after re-acquisition.
 """
 
 from __future__ import annotations
+
 from typing import Optional, Tuple
 
 from eye_module.config import EMA_ALPHA
@@ -25,7 +26,7 @@ from eye_module.config import EMA_ALPHA
 
 class EMASmoother:
     """
-    Thread-safe Exponential Moving Average smoother for (x, y) coordinates.
+    Exponential Moving Average smoother for (x, y) coordinates.
 
     Parameters
     ----------
@@ -37,11 +38,12 @@ class EMASmoother:
     def __init__(self, alpha: float = EMA_ALPHA) -> None:
         if not (0.0 < alpha <= 1.0):
             raise ValueError(f"alpha must be in (0, 1], got {alpha!r}")
-        self._alpha = alpha
+        self._alpha: float = alpha
+        # Stored as float once initialised; None only before first update.
         self._x: Optional[float] = None
         self._y: Optional[float] = None
 
-    # ── Public API ────────────────────────────────────────────────────────────
+    # ── Properties ────────────────────────────────────────────────────────────
 
     @property
     def alpha(self) -> float:
@@ -53,32 +55,39 @@ class EMASmoother:
             raise ValueError(f"alpha must be in (0, 1], got {value!r}")
         self._alpha = value
 
+    @property
+    def has_state(self) -> bool:
+        """``True`` after the first :meth:`update`, ``False`` after :meth:`reset`."""
+        return self._x is not None
+
+    @property
+    def value(self) -> Optional[Tuple[float, float]]:
+        """Current smoothed value, or ``None`` if no state."""
+        if self._x is None or self._y is None:
+            return None
+        return self._x, self._y
+
+    # ── Public API ────────────────────────────────────────────────────────────
+
     def update(self, x: float, y: float) -> Tuple[float, float]:
         """
-        Feed a new raw sample and return the smoothed (x, y).
+        Feed a raw sample; return the smoothed (x, y).
 
-        On the very first call (or after :meth:`reset`) the raw value is
+        On the first call (or after :meth:`reset`) the raw value is
         returned unchanged and stored as the initial state.
-
-        Parameters
-        ----------
-        x, y : float
-            Raw coordinate sample (any unit – pixels, normalised, etc.).
-
-        Returns
-        -------
-        (float, float)
-            Smoothed coordinate pair in the same unit as the input.
         """
-        if self._x is None:
-            # Bootstrap: accept the first sample as-is
+        if self._x is None or self._y is None:
+            # Bootstrap: accept the first sample as-is.
+            # After this branch _x/_y are always float.
             self._x = x
             self._y = y
         else:
             a = self._alpha
+            # Both _x and _y are guaranteed float here — narrowed above.
             self._x = a * x + (1.0 - a) * self._x
             self._y = a * y + (1.0 - a) * self._y
 
+        # At this point _x and _y are always float (never None).
         return self._x, self._y
 
     def reset(self) -> None:
@@ -90,15 +99,3 @@ class EMASmoother:
         """
         self._x = None
         self._y = None
-
-    @property
-    def has_state(self) -> bool:
-        """``True`` after the first :meth:`update` call, ``False`` after :meth:`reset`."""
-        return self._x is not None
-
-    @property
-    def value(self) -> Optional[Tuple[float, float]]:
-        """Current smoothed value, or ``None`` if the smoother has no state."""
-        if self._x is None:
-            return None
-        return self._x, self._y
