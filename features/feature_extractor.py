@@ -277,7 +277,8 @@ BENT_ANGLE_THRESHOLD = 120.0
 def determine_finger_state(
     finger,
     finger_status,
-    angle_features
+    angle_features,
+    landmarks=None
 ):
 
     status = finger_status.get(finger)
@@ -289,9 +290,22 @@ def determine_finger_state(
     if not status["complete"]:
         return "unknown"
 
-    # Thumb does not currently have the same
-    # angle structure as the other four fingers.
     if finger == "Thumb":
+        if landmarks is None:
+            return "unknown"
+
+        thumb_angle = calculate_angle(
+            landmarks.get("Thumb_CMC"),
+            landmarks.get("Thumb_MCP"),
+            landmarks.get("Thumb_Tip")
+        )
+
+        if thumb_angle is None:
+            return "unknown"
+        if thumb_angle >= 145.0:
+            return "straight"
+        if thumb_angle <= 115.0:
+            return "bent"
         return "unknown"
 
     angle_names = FINGER_ANGLE_PAIRS.get(finger)
@@ -322,7 +336,7 @@ def determine_finger_state(
     return "unknown"
 
 
-def extract_finger_states(finger_status, angle_features):
+def extract_finger_states(finger_status, angle_features, landmarks):
 
     finger_states = {}
 
@@ -337,7 +351,8 @@ def extract_finger_states(finger_status, angle_features):
         finger_states[finger] = determine_finger_state(
             finger,
             finger_status,
-            angle_features
+            angle_features,
+            landmarks
         )
 
     return finger_states
@@ -364,7 +379,8 @@ def extract_features(landmarks, finger_status):
 
     finger_states = extract_finger_states(
         finger_status,
-        angle_features
+        angle_features,
+        normalized
     )
 
     return {

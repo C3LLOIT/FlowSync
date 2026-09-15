@@ -3,6 +3,7 @@ import urllib.request
 import zipfile
 
 import cv2
+import numpy as np
 import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
@@ -46,6 +47,7 @@ class HandTracker:
             num_hands=2,
             min_hand_detection_confidence=0.4,
             min_hand_presence_confidence=0.4,
+            min_tracking_confidence=0.35,
         )
 
         self.detector = vision.HandLandmarker.create_from_options(options)
@@ -53,7 +55,8 @@ class HandTracker:
         self.fps = 30  # Match camera.py setting
 
     def detect(self, frame):
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        detection_frame = self._prepare_frame(frame)
+        rgb_frame = cv2.cvtColor(detection_frame, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
 
         # Convert frame count to milliseconds timestamp
@@ -61,3 +64,27 @@ class HandTracker:
         self.frame_count += 1
 
         return self.detector.detect_for_video(mp_image, timestamp_ms)
+
+    @staticmethod
+    def _prepare_frame(frame):
+        """Improve local contrast and lift very dark frames for detection."""
+        lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+        lightness, green_red, blue_yellow = cv2.split(lab)
+        lightness = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(
+            lightness
+        )
+        enhanced = cv2.cvtColor(
+            cv2.merge((lightness, green_red, blue_yellow)),
+            cv2.COLOR_LAB2BGR,
+        )
+
+        mean_brightness = float(np.mean(cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)))
+        if mean_brightness < 105.0:
+            gamma = 0.75 if mean_brightness >= 65.0 else 0.62
+            lookup = np.array(
+                [((value / 255.0) ** gamma) * 255 for value in range(256)],
+                dtype=np.uint8,
+            )
+            enhanced = cv2.LUT(enhanced, lookup)
+
+        return enhanced

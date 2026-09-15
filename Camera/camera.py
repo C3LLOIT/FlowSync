@@ -12,11 +12,11 @@ def get_frame(cap):
 def open_camera():
     camera_candidates = [
         (0, cv2.CAP_DSHOW),
-        #(0, cv2.CAP_ANY),
+        (0, cv2.CAP_ANY),
         (1, cv2.CAP_DSHOW),
-        #(1, cv2.CAP_ANY),
+        (1, cv2.CAP_ANY),
         (2, cv2.CAP_DSHOW),
-        #(2, cv2.CAP_ANY),
+        (2, cv2.CAP_ANY),
     ]
 
     for index, backend in camera_candidates:

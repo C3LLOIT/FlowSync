@@ -5,7 +5,10 @@ from mediapipe.tasks.python.vision import drawing_styles, drawing_utils
 
 from Camera.camera import open_camera, get_frame
 from hand_tracking.hand_tracker import HandTracker
-from Landmarks.landmarks_processor import process_landmarks
+from Landmarks.landmarks_processor import (
+    check_finger_visibility,
+    process_landmarks,
+)
 from Landmarks.landmarks_smoothing import LandmarkSmoother
 
 from features.cv_pipeline import get_hand_features
@@ -24,7 +27,7 @@ def run():
     tracker = HandTracker()
 
     # Create landmark smoother
-    smoother = LandmarkSmoother(alpha=0.5)
+    smoothers = {}
 
     # Create display window
     cv2.namedWindow("FlowSync", cv2.WINDOW_NORMAL)
@@ -46,19 +49,40 @@ def run():
 
         # Process detected landmarks
         processed_landmarks = process_landmarks(result)
+
+        if not processed_landmarks:
+            smoothers.clear()
+
+        active_smoothers = set()
         
         # Process each detected hand
-        for hand in processed_landmarks:
+        for hand_index, hand in enumerate(processed_landmarks):
+
+            handedness = "hand_" + str(hand_index)
+            if result and getattr(result, "handedness", None):
+                categories = result.handedness[hand_index]
+                if categories:
+                    handedness = categories[0].category_name or handedness
+
+            active_smoothers.add(handedness)
+
+            smoother = smoothers.setdefault(
+                handedness,
+                LandmarkSmoother(alpha=0.5)
+            )
 
             # Smooth landmark coordinates
             smoothed_landmarks = smoother.smooth(
                 hand["landmarks"]
             )
 
+            # Use the smoothed coordinates for gesture completeness as well.
+            finger_status = check_finger_visibility(smoothed_landmarks)
+
             # Generate CV feature output
             output = get_hand_features(
                 smoothed_landmarks,
-                hand["finger_status"]
+                finger_status
             )
 
             if output is None:
@@ -67,6 +91,9 @@ def run():
             # CV output is ready for the AI/ML layer
             # output["feature_vector"] contains 79 features
             # output["finger_states"] contains finger states
+
+        for smoother_id in set(smoothers) - active_smoothers:
+            del smoothers[smoother_id]
 
         # Draw hand landmarks
         if result and getattr(result, "hand_landmarks", None):
