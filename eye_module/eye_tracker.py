@@ -61,19 +61,6 @@ log = logging.getLogger(__name__)
 
 # ── Deferred heavy imports ────────────────────────────────────────────────────
 
-def _import_autopy():
-    """Return the autopy module, or None if not installed."""
-    try:
-        import autopy
-        return autopy
-    except ImportError:
-        log.warning(
-            "autopy is not installed — mouse control disabled. "
-            "Run: pip install autopy"
-        )
-        return None
-
-
 def _import_mediapipe():
     try:
         import mediapipe as mp
@@ -101,7 +88,8 @@ from eye_module.config import (
     MP_NUM_FACES,
     SCREEN_MARGIN_PX,
 )
-from eye_module.smoother import EMASmoother
+from eye_module.mouse_control import MouseController
+from eye_module.smoother      import EMASmoother
 
 
 # ── Model bootstrapping ───────────────────────────────────────────────────────
@@ -293,8 +281,8 @@ class EyeTracker:
 
     def _tracking_loop(self) -> None:
         """Main loop — runs entirely on the background thread."""
-        mp     = _import_mediapipe()
-        autopy = _import_autopy()   # None if not installed
+        mp    = _import_mediapipe()
+        mouse = MouseController()   # cross-platform, no external deps
 
         cap:        Optional[cv2.VideoCapture] = None
         landmarker = None
@@ -354,11 +342,7 @@ class EyeTracker:
                 sy = max(SCREEN_MARGIN_PX, min(self._screen_h - SCREEN_MARGIN_PX, sy))
 
                 # 4. Move mouse
-                if autopy is not None:
-                    try:
-                        autopy.mouse.move(sx, sy)
-                    except Exception as exc:
-                        log.debug("autopy.mouse.move error: %s", exc)
+                mouse.move(sx, sy)
 
                 # 5. Notify move listeners
                 self._fire(self.on_move, sx, sy)
@@ -449,19 +433,9 @@ class EyeTracker:
                 log.debug("Callback %s raised: %s", callback, exc)
 
     def _on_blink_click_internal(self) -> None:
-        autopy = _import_autopy()
-        if autopy is not None:
-            try:
-                autopy.mouse.click()
-            except Exception as exc:
-                log.debug("autopy click error: %s", exc)
+        MouseController().click()
         self._fire(self.on_blink_click)
 
     def _on_dwell_click_internal(self) -> None:
-        autopy = _import_autopy()
-        if autopy is not None:
-            try:
-                autopy.mouse.click()
-            except Exception as exc:
-                log.debug("autopy click error: %s", exc)
+        MouseController().click()
         self._fire(self.on_dwell_click)

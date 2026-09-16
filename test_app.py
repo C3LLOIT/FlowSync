@@ -41,11 +41,10 @@ if TYPE_CHECKING:
 # ── Screen size ───────────────────────────────────────────────────────────────
 
 def _get_screen_size() -> tuple[int, int]:
-    """autopy → PySide6 → tkinter → 1920×1080 fallback."""
+    """MouseController → PySide6 → tkinter → 1920×1080 fallback."""
     try:
-        import autopy  # type: ignore[import]
-        sw, sh = autopy.screen.size()
-        return int(sw), int(sh)
+        from eye_module.mouse_control import MouseController
+        return MouseController().screen_size()
     except Exception:
         pass
     try:

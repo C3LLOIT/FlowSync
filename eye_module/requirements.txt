@@ -6,6 +6,11 @@
 
 mediapipe>=0.10.13
 opencv-python>=4.8.0
-autopy>=4.0.0
 numpy>=1.24.0
 PySide6>=6.5.0
+
+# Mouse control — no extra install needed on Windows (uses ctypes/Win32 API)
+# Linux:  pip install python-xlib   OR   sudo apt install xdotool
+# macOS:  no extra install needed (uses CoreGraphics via ctypes)
+
+# autopy is no longer used — replaced by native OS mouse control
