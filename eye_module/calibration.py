@@ -58,6 +58,8 @@ from eye_module.config import (
     CALIBRATION_STABILITY_MIN_FRAMES,
     CALIBRATION_STABILITY_RADIUS,
     CALIBRATION_TARGETS,
+    EAR_LEFT_HORIZONTAL,
+    EAR_RIGHT_HORIZONTAL,
     IRIS_LEFT_INDICES,
     IRIS_RIGHT_INDICES,
 )
@@ -76,12 +78,59 @@ def _iris_centre(landmarks, indices: List[int]) -> Tuple[float, float]:
 
 def raw_gaze_point(landmarks) -> Tuple[float, float]:
     """
-    Average of both iris centres in normalised camera space [0, 1].
-    Exported so calibration and the tracker share the same computation.
+    Compute gaze direction as iris position RELATIVE to each eye socket.
+
+    Instead of returning the absolute iris position in the camera frame
+    (which moves with the head), we express the iris position as a
+    fraction within the eye socket bounding box:
+
+        gaze_x = (iris_cx - eye_inner_corner_x) / eye_width
+        gaze_y = (iris_cy - eye_top_y)           / eye_height
+
+    This cancels out head translation and rotation, so the result
+    reflects where the eyes are pointing rather than where the head is.
+
+    Both eyes are averaged and returned as (x, y) in [0, 1] approximately
+    (may slightly exceed bounds at extreme gaze angles — clamped downstream).
     """
-    rx, ry = _iris_centre(landmarks, IRIS_RIGHT_INDICES)
-    lx, ly = _iris_centre(landmarks, IRIS_LEFT_INDICES)
-    return (rx + lx) / 2.0, (ry + ly) / 2.0
+    # ── Right eye ─────────────────────────────────────────────────────────────
+    # Eye corners: inner (133), outer (33); vertical span via iris indices
+    rx_iris, ry_iris = _iris_centre(landmarks, IRIS_RIGHT_INDICES)
+
+    r_inner = landmarks[EAR_RIGHT_HORIZONTAL[1]]   # index 133 = inner corner
+    r_outer = landmarks[EAR_RIGHT_HORIZONTAL[0]]   # index 33  = outer corner
+    r_eye_w = abs(r_inner.x - r_outer.x)
+    r_eye_h = abs(r_inner.y - r_outer.y) + 0.001  # avoid div-by-zero
+
+    if r_eye_w < 0.001:
+        # Eye not visible — fallback to absolute position
+        rel_rx = rx_iris
+        rel_ry = ry_iris
+    else:
+        # Normalise: 0 = outer corner, 1 = inner corner
+        rel_rx = (rx_iris - r_outer.x) / r_eye_w
+        rel_ry = (ry_iris - min(r_inner.y, r_outer.y)) / r_eye_h
+
+    # ── Left eye ──────────────────────────────────────────────────────────────
+    lx_iris, ly_iris = _iris_centre(landmarks, IRIS_LEFT_INDICES)
+
+    l_inner = landmarks[EAR_LEFT_HORIZONTAL[0]]    # index 362 = inner corner
+    l_outer = landmarks[EAR_LEFT_HORIZONTAL[1]]    # index 263 = outer corner
+    l_eye_w = abs(l_inner.x - l_outer.x)
+    l_eye_h = abs(l_inner.y - l_outer.y) + 0.001
+
+    if l_eye_w < 0.001:
+        rel_lx = lx_iris
+        rel_ly = ly_iris
+    else:
+        rel_lx = (lx_iris - l_inner.x) / l_eye_w
+        rel_ly = (ly_iris - min(l_inner.y, l_outer.y)) / l_eye_h
+
+    # ── Average both eyes ─────────────────────────────────────────────────────
+    gaze_x = (rel_rx + rel_lx) / 2.0
+    gaze_y = (rel_ry + rel_ly) / 2.0
+
+    return gaze_x, gaze_y
 
 
 def _iris_delta(a: Tuple[float, float], b: Tuple[float, float]) -> float:
@@ -163,7 +212,10 @@ class CalibrationManager:
         Falls back to a proportional mapping when not calibrated.
         """
         if self._matrix is None:
-            # Fallback: simple proportion — mirrors the camera horizontally
+            # Fallback: linear map from relative gaze space to screen.
+            # iris_x is relative iris position within eye socket (0=outer, 1=inner).
+            # We mirror X so that looking right → cursor moves right.
+            # Y is mapped directly (looking down → cursor moves down).
             return (1.0 - iris_x) * self._sw, iris_y * self._sh
 
         pt = np.array([iris_x, iris_y, 1.0], dtype=np.float64)
