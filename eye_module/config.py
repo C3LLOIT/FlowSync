@@ -61,6 +61,44 @@ EAR_RIGHT_HORIZONTAL     = (33, 133)
 EAR_LEFT_VERTICAL_PAIRS  = [(386, 374), (385, 380), (387, 373)]
 EAR_LEFT_HORIZONTAL      = (362, 263)
 
+# ── Gaze bounding-box landmarks ──────────────────────────────────────────────
+# Used by raw_gaze_point() to compute iris position relative to the eye socket.
+#
+# Horizontal bounds — same as EAR horizontal pairs:
+#   GAZE_RIGHT_EYE_LEFT  = 33   (outer/temporal corner of right eye)
+#   GAZE_RIGHT_EYE_RIGHT = 133  (inner/nasal corner of right eye)
+#   GAZE_LEFT_EYE_LEFT   = 362  (inner/nasal corner of left eye)
+#   GAZE_LEFT_EYE_RIGHT  = 263  (outer/temporal corner of left eye)
+#
+# Vertical bounds — top and bottom eyelid points, averaged over 3 pairs
+# for stability (single-landmark estimates are noisier).
+#
+# Right eye eyelid top landmarks:    159, 158, 160
+# Right eye eyelid bottom landmarks: 145, 153, 144
+GAZE_RIGHT_EYELID_TOP    = [159, 158, 160]
+GAZE_RIGHT_EYELID_BOTTOM = [145, 153, 144]
+
+# Left eye eyelid top landmarks:    386, 385, 387
+# Left eye eyelid bottom landmarks: 374, 380, 373
+GAZE_LEFT_EYELID_TOP    = [386, 385, 387]
+GAZE_LEFT_EYELID_BOTTOM = [374, 380, 373]
+
+# ── Gaze validation thresholds ───────────────────────────────────────────────
+# Landmark validation: skip gaze update if the eye geometry is below these
+# thresholds (occluded, extreme head pose, partially closed, blink, etc.)
+#
+# Both thresholds are in normalised image units (0–1).
+# At 640 px width:  MIN_EYE_WIDTH  0.02 → ~13 px
+# At 480 px height: MIN_EYE_HEIGHT 0.006 → ~3 px  (intentionally permissive;
+#   eye height is small even when fully open — tune after seeing debug data)
+GAZE_MIN_EYE_WIDTH  = 0.02    # horizontal extent of the eye socket
+GAZE_MIN_EYE_HEIGHT = 0.006   # vertical extent (top eyelid → bottom eyelid)
+
+# Iris coordinate sanity range — iris should sit within the eye socket.
+# Values outside [-0.1, 1.1] indicate a tracking failure.
+GAZE_IRIS_RANGE_MIN = -0.1
+GAZE_IRIS_RANGE_MAX =  1.1
+
 # ── Gaze / Smoothing ─────────────────────────────────────────────────────────
 EMA_ALPHA        = 0.25   # Exponential Moving Average weight (0 < α ≤ 1).
                            # Lower = smoother but slower; higher = snappier.
@@ -101,5 +139,4 @@ CALIBRATION_STABILITY_RADIUS     = 0.015  # max iris delta between frames
 CALIBRATION_STABILITY_MIN_FRAMES = 10     # consecutive stable frames needed
 
 # ── Mouse movement ───────────────────────────────────────────────────────────
-MOUSE_MOVE_SPEED   = 0.5    # autopy move duration (seconds); 0 = instant
-SCREEN_MARGIN_PX   = 5      # Keep cursor this far from screen edges
+SCREEN_MARGIN_PX = 5   # Keep cursor this far from screen edges (pixels)

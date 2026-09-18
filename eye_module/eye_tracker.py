@@ -73,7 +73,12 @@ def _import_mediapipe():
 
 # ── Local imports ─────────────────────────────────────────────────────────────
 from eye_module.blink_detector import BlinkDetector
-from eye_module.calibration    import CalibrationManager, raw_gaze_point
+from eye_module.calibration    import (
+    CalibrationManager,
+    GazeDebugInfo,
+    compute_gaze,
+    raw_gaze_point,
+)
 from eye_module.config import (
     CALIBRATION_PATH,
     CAMERA_FPS,
@@ -185,6 +190,13 @@ class EyeTracker:
         self.on_error:       Optional[Callable[[Exception], None]]    = None
         # Preview hook — receives (bgr_frame, mediapipe_result) every frame
         self.on_frame: Optional[Callable[[np.ndarray, object], None]] = None
+
+        # Debug hook — receives GazeDebugInfo every frame when debug_enabled=True.
+        # Subscribe before calling start(); safely ignored when None.
+        self.on_debug: Optional[Callable[[GazeDebugInfo], None]] = None
+
+        # Set to True to emit on_debug every frame (slight CPU overhead).
+        self.debug_enabled: bool = False
 
         # ── Sub-components ─────────────────────────────────────────────
         self._smoother    = EMASmoother()
@@ -330,24 +342,44 @@ class EyeTracker:
                     face_was_visible = True
                     self._fire(self.on_face_found)
 
-                # 1. Raw gaze → screen coordinates
-                raw_x, raw_y       = raw_gaze_point(lms)
+                # 1. Compute gaze (full debug bundle always computed when
+                #    debug_enabled; otherwise use the lightweight wrapper)
+                if self.debug_enabled:
+                    gaze_info = compute_gaze(lms)
+                    self._fire(self.on_debug, gaze_info)
+                    gaze_pt = gaze_info.averaged_gaze   # None if invalid
+                else:
+                    gaze_pt = raw_gaze_point(lms)       # None if invalid
+
+                # 2. Validation gate — skip cursor update on bad landmarks
+                #    (blink, occlusion, extreme head pose, tracking failure)
+                if gaze_pt is None:
+                    # Smoother keeps last position; blink detector still runs
+                    with self._lock:
+                        if self._smoother.has_state:
+                            sx, sy = self._smoother.value  # type: ignore[misc]
+                            self._blink.update(lms, sx, sy)
+                    continue
+
+                raw_x, raw_y = gaze_pt
+
+                # 3. Map gaze → screen coordinates
                 screen_x, screen_y = self._calibration.map(raw_x, raw_y)
 
-                # 2. Smooth
+                # 4. Smooth
                 sx, sy = self._smoother.update(screen_x, screen_y)
 
-                # 3. Clamp
+                # 5. Clamp to screen bounds
                 sx = max(SCREEN_MARGIN_PX, min(self._screen_w - SCREEN_MARGIN_PX, sx))
                 sy = max(SCREEN_MARGIN_PX, min(self._screen_h - SCREEN_MARGIN_PX, sy))
 
-                # 4. Move mouse
+                # 6. Move mouse
                 mouse.move(sx, sy)
 
-                # 5. Notify move listeners
+                # 7. Notify move listeners
                 self._fire(self.on_move, sx, sy)
 
-                # 6. Blink / dwell detection
+                # 8. Blink / dwell detection (always runs on valid frames)
                 with self._lock:
                     self._blink.update(lms, sx, sy)
 

@@ -35,6 +35,7 @@ from PySide6.QtGui  import QColor, QPalette, QPixmap, QImage, QPainter
 
 if TYPE_CHECKING:
     from eye_module.eye_tracker import EyeTracker
+    from eye_module.calibration import GazeDebugInfo
     from eye_module.preview     import PreviewModule
 
 
@@ -157,6 +158,7 @@ class TrackerBridge(QObject):
     sig_status        = Signal(str)
     sig_preview_frame = Signal(object)   # numpy BGR frame
     sig_cal_state     = Signal(str)
+    sig_debug         = Signal(object)   # GazeDebugInfo
 
     def __init__(self, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
@@ -203,6 +205,9 @@ class TrackerBridge(QObject):
             self.sig_preview_frame.emit(rendered)
 
         self._tracker.on_frame = _on_frame
+
+        # Wire debug callback — only emits when tracker.debug_enabled=True
+        self._tracker.on_debug = self.sig_debug.emit
         return True
 
     # ── Control API ───────────────────────────────────────────────────
@@ -253,6 +258,10 @@ class TrackerBridge(QObject):
     def set_preview_enabled(self, enabled: bool) -> None:
         if self._preview is not None:
             self._preview.enabled = enabled
+
+    def set_debug_enabled(self, enabled: bool) -> None:
+        if self._tracker is not None:
+            self._tracker.debug_enabled = enabled
 
     def set_dwell_enabled(self, enabled: bool) -> None:
         if self._tracker is not None:
@@ -410,6 +419,97 @@ class EventLog(QWidget):
         QTimer.singleShot(10, lambda: sb.setValue(sb.maximum()))
 
 
+
+
+# ╔══════════════════════════════════════════════════════════════════════╗
+# ║  DEBUG PANEL                                                         ║
+# ╚══════════════════════════════════════════════════════════════════════╝
+
+class DebugPanel(QFrame):
+    """
+    Displays real-time GazeDebugInfo when debug mode is enabled.
+    Shows per-eye iris position, gaze coordinates, validation status.
+    """
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("panel")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(12, 10, 12, 12)
+        lay.setSpacing(6)
+
+        hdr = QHBoxLayout()
+        title = QLabel("DEBUG — GAZE RAW DATA")
+        title.setObjectName("section_title")
+        self._valid_badge = QLabel("●  OFF")
+        self._valid_badge.setStyleSheet(f"font-size:11px;font-weight:600;color:{DARK['text_muted']};")
+        hdr.addWidget(title)
+        hdr.addStretch()
+        hdr.addWidget(self._valid_badge)
+        lay.addLayout(hdr)
+
+        # Grid of debug values
+        grid = QGridLayout()
+        grid.setSpacing(4)
+        grid.setColumnMinimumWidth(1, 140)
+        grid.setColumnMinimumWidth(3, 140)
+
+        def _row(label: str, row: int, col: int = 0):
+            lbl = QLabel(label)
+            lbl.setStyleSheet(f"color:{DARK['text_muted']};font-size:11px;")
+            val = QLabel("—")
+            val.setStyleSheet(
+                f"color:{DARK['text']};font-size:11px;"
+                f"font-family:'Consolas',monospace;"
+            )
+            grid.addWidget(lbl, row, col)
+            grid.addWidget(val, row, col + 1)
+            return val
+
+        self._v_r_iris   = _row("Right iris (cam)",  0, 0)
+        self._v_l_iris   = _row("Left iris (cam)",   0, 2)
+        self._v_r_gaze   = _row("Right gaze",        1, 0)
+        self._v_l_gaze   = _row("Left gaze",         1, 2)
+        self._v_avg      = _row("Averaged gaze",     2, 0)
+        self._v_r_bounds = _row("Right eye W×H",     2, 2)
+        self._v_l_bounds = _row("Left eye W×H",      3, 0)
+        self._v_reason   = _row("Reason",            3, 2)
+
+        lay.addLayout(grid)
+
+    def update_debug(self, info: object) -> None:
+        """Receive a GazeDebugInfo and update all labels."""
+        try:
+            from eye_module.calibration import GazeDebugInfo
+            if not isinstance(info, GazeDebugInfo):
+                return
+
+            def _fmt(pt) -> str:
+                if pt is None: return "—"
+                return f"({pt[0]:.3f}, {pt[1]:.3f})"
+
+            def _fmt_bounds(b) -> str:
+                if b is None: return "—"
+                return f"{b.width:.3f} × {b.height:.3f}"
+
+            valid = info.tracking_valid
+            self._valid_badge.setText("●  VALID" if valid else "●  INVALID")
+            self._valid_badge.setStyleSheet(
+                f"font-size:11px;font-weight:600;"
+                f"color:{DARK['green'] if valid else DARK['red']};"
+            )
+
+            self._v_r_iris.setText(_fmt(info.right_iris))
+            self._v_l_iris.setText(_fmt(info.left_iris))
+            self._v_r_gaze.setText(_fmt(info.right_gaze))
+            self._v_l_gaze.setText(_fmt(info.left_gaze))
+            self._v_avg.setText(_fmt(info.averaged_gaze))
+            self._v_r_bounds.setText(_fmt_bounds(info.right_eye_bounds))
+            self._v_l_bounds.setText(_fmt_bounds(info.left_eye_bounds))
+            self._v_reason.setText(info.validation_reason[:40] or "—")
+        except Exception:
+            pass
+
 # ╔══════════════════════════════════════════════════════════════════════╗
 # ║  MAIN WINDOW                                                         ║
 # ╚══════════════════════════════════════════════════════════════════════╝
@@ -494,6 +594,15 @@ class MainWindow(QMainWindow):
         dr.addWidget(dl); dr.addStretch(); dr.addWidget(self._btn_dwell); ol.addLayout(dr)
         self._div(ol)
 
+        # Debug mode toggle
+        dbr = QHBoxLayout(); dbl = QLabel("Debug Mode"); dbl.setStyleSheet(f"color:{DARK['text_dim']};")
+        self._btn_debug = QPushButton("Off"); self._btn_debug.setCheckable(True); self._btn_debug.setFixedWidth(56)
+        self._btn_debug.setStyleSheet(
+            f"QPushButton{{color:{DARK['text_muted']};}} QPushButton:checked{{color:{DARK['amber']};border-color:{DARK['amber']};}}"
+        )
+        dbr.addWidget(dbl); dbr.addStretch(); dbr.addWidget(self._btn_debug); ol.addLayout(dbr)
+        self._div(ol)
+
         # EMA alpha slider
         al = QLabel("Smoothing (EMA α)"); al.setStyleSheet(f"color:{DARK['text_dim']};")
         ar = QHBoxLayout()
@@ -532,6 +641,11 @@ class MainWindow(QMainWindow):
         top.addWidget(self._preview_panel, stretch=0)
         col.addLayout(top)
 
+        # Debug panel (hidden by default)
+        self._debug_panel = DebugPanel()
+        self._debug_panel.setVisible(False)
+        col.addWidget(self._debug_panel)
+
         lg = QGroupBox("Event Log"); ll = QVBoxLayout(lg); ll.setContentsMargins(4, 12, 4, 4)
         self._log = EventLog(); self._log.setMinimumHeight(260); ll.addWidget(self._log)
         bc = QPushButton("Clear log"); bc.setFixedWidth(90); bc.clicked.connect(self._clear_log)
@@ -558,6 +672,8 @@ class MainWindow(QMainWindow):
         self._bridge.sig_status.connect(self._on_status)
         self._bridge.sig_preview_frame.connect(self._on_preview_frame)
         self._bridge.sig_cal_state.connect(self._on_cal_state)
+        self._bridge.sig_debug.connect(self._on_debug)
+        self._btn_debug.toggled.connect(self._on_debug_toggled)
 
     # ── Handlers ──────────────────────────────────────────────────────
 
@@ -605,6 +721,18 @@ class MainWindow(QMainWindow):
         alpha = value / 100.0
         self._alpha_label.setText(f"{alpha:.2f}")
         self._bridge.set_ema_alpha(alpha)
+
+    def _on_debug_toggled(self, checked: bool) -> None:
+        self._btn_debug.setText("On" if checked else "Off")
+        self._bridge.set_debug_enabled(checked)
+        self._debug_panel.setVisible(checked)
+        self._log.append(
+            f"⚙ Debug mode {'enabled' if checked else 'disabled'}",
+            DARK["amber"] if checked else DARK["text_dim"],
+        )
+
+    def _on_debug(self, info: object) -> None:
+        self._debug_panel.update_debug(info)
 
     def _on_move(self, x: float, y: float) -> None:
         self._card_pos.set_value(f"{x:.0f}, {y:.0f}")

@@ -60,6 +60,14 @@ from eye_module.config import (
     CALIBRATION_TARGETS,
     EAR_LEFT_HORIZONTAL,
     EAR_RIGHT_HORIZONTAL,
+    GAZE_IRIS_RANGE_MAX,
+    GAZE_IRIS_RANGE_MIN,
+    GAZE_LEFT_EYELID_BOTTOM,
+    GAZE_LEFT_EYELID_TOP,
+    GAZE_MIN_EYE_HEIGHT,
+    GAZE_MIN_EYE_WIDTH,
+    GAZE_RIGHT_EYELID_BOTTOM,
+    GAZE_RIGHT_EYELID_TOP,
     IRIS_LEFT_INDICES,
     IRIS_RIGHT_INDICES,
 )
@@ -67,74 +75,307 @@ from eye_module.config import (
 log = logging.getLogger(__name__)
 
 
-# ── Iris helpers ──────────────────────────────────────────────────────────────
+# ╔══════════════════════════════════════════════════════════════════════╗
+# ║  PHASE 1 — GAZE ACCURACY                                            ║
+# ╚══════════════════════════════════════════════════════════════════════╝
 
-def _iris_centre(landmarks, indices: List[int]) -> Tuple[float, float]:
-    """Return the centroid of the given landmark indices."""
+# ── Data classes ──────────────────────────────────────────────────────────────
+
+from dataclasses import dataclass
+
+@dataclass
+class EyeBounds:
+    """
+    Bounding box of one eye socket in normalised image space.
+
+    x_left  — outer (temporal) corner x
+    x_right — inner (nasal) corner x
+    y_top   — average of upper eyelid landmarks
+    y_bottom— average of lower eyelid landmarks
+    width   — horizontal extent (x_right - x_left, always positive)
+    height  — vertical extent  (y_bottom - y_top,  always positive)
+    """
+    x_left:   float
+    x_right:  float
+    y_top:    float
+    y_bottom: float
+
+    @property
+    def width(self) -> float:
+        return abs(self.x_right - self.x_left)
+
+    @property
+    def height(self) -> float:
+        return abs(self.y_bottom - self.y_top)
+
+
+@dataclass
+class GazeDebugInfo:
+    """
+    Per-frame diagnostic bundle emitted via EyeTracker.on_debug().
+
+    All coordinates are in normalised user-perspective gaze space
+    (x=0 left, x=1 right, y=0 top, y=1 bottom) unless noted.
+
+    Fields
+    ------
+    left_iris         Raw normalised iris centre of the left eye  (camera space)
+    right_iris        Raw normalised iris centre of the right eye (camera space)
+    left_eye_bounds   EyeBounds for the left eye
+    right_eye_bounds  EyeBounds for the right eye
+    left_gaze         Normalised gaze from left eye alone  (user-perspective)
+    right_gaze        Normalised gaze from right eye alone (user-perspective)
+    averaged_gaze     Average of left_gaze + right_gaze
+    tracking_valid    False if validation failed (cursor not updated)
+    validation_reason Human-readable reason when tracking_valid is False
+    """
+    left_iris:         Optional[Tuple[float, float]]
+    right_iris:        Optional[Tuple[float, float]]
+    left_eye_bounds:   Optional[EyeBounds]
+    right_eye_bounds:  Optional[EyeBounds]
+    left_gaze:         Optional[Tuple[float, float]]
+    right_gaze:        Optional[Tuple[float, float]]
+    averaged_gaze:     Optional[Tuple[float, float]]
+    tracking_valid:    bool
+    validation_reason: str = ""
+
+
+# ── Low-level landmark helpers ────────────────────────────────────────────────
+
+def _lm_mean(landmarks, indices: List[int]) -> Tuple[float, float]:
+    """Return (mean_x, mean_y) of the given landmark indices."""
     xs = [landmarks[i].x for i in indices]
     ys = [landmarks[i].y for i in indices]
     return sum(xs) / len(xs), sum(ys) / len(ys)
 
 
-def raw_gaze_point(landmarks) -> Tuple[float, float]:
+def _iris_centre(landmarks, indices: List[int]) -> Tuple[float, float]:
+    """Return the centroid (mean_x, mean_y) of iris ring landmarks."""
+    return _lm_mean(landmarks, indices)
+
+
+def _build_eye_bounds(
+    landmarks,
+    horizontal: Tuple[int, int],   # (outer_idx, inner_idx)
+    eyelid_top: List[int],
+    eyelid_bottom: List[int],
+) -> EyeBounds:
     """
-    Compute gaze direction as iris position RELATIVE to each eye socket.
+    Compute the bounding box of one eye socket.
 
-    Instead of returning the absolute iris position in the camera frame
-    (which moves with the head), we express the iris position as a
-    fraction within the eye socket bounding box:
+    Horizontal extent: outer corner → inner corner (both on the same
+    horizontal axis — avoids the near-zero height bug from previous
+    implementation that used only two corner landmarks).
 
-        gaze_x = (iris_cx - eye_inner_corner_x) / eye_width
-        gaze_y = (iris_cy - eye_top_y)           / eye_height
-
-    This cancels out head translation and rotation, so the result
-    reflects where the eyes are pointing rather than where the head is.
-
-    Both eyes are averaged and returned as (x, y) in [0, 1] approximately
-    (may slightly exceed bounds at extreme gaze angles — clamped downstream).
+    Vertical extent: mean of the three upper-eyelid landmarks (top)
+    and mean of the three lower-eyelid landmarks (bottom).  Averaging
+    three points per lid gives a much more stable estimate than any
+    single landmark.
     """
-    # ── Right eye ─────────────────────────────────────────────────────────────
-    # Eye corners: inner (133), outer (33); vertical span via iris indices
-    rx_iris, ry_iris = _iris_centre(landmarks, IRIS_RIGHT_INDICES)
+    outer_x = landmarks[horizontal[0]].x
+    inner_x = landmarks[horizontal[1]].x
 
-    r_inner = landmarks[EAR_RIGHT_HORIZONTAL[1]]   # index 133 = inner corner
-    r_outer = landmarks[EAR_RIGHT_HORIZONTAL[0]]   # index 33  = outer corner
-    r_eye_w = abs(r_inner.x - r_outer.x)
-    r_eye_h = abs(r_inner.y - r_outer.y) + 0.001  # avoid div-by-zero
+    _, top_y    = _lm_mean(landmarks, eyelid_top)
+    _, bottom_y = _lm_mean(landmarks, eyelid_bottom)
 
-    if r_eye_w < 0.001:
-        # Eye not visible — fallback to absolute position
-        rel_rx = rx_iris
-        rel_ry = ry_iris
-    else:
-        # Normalise: 0 = outer corner, 1 = inner corner
-        rel_rx = (rx_iris - r_outer.x) / r_eye_w
-        rel_ry = (ry_iris - min(r_inner.y, r_outer.y)) / r_eye_h
+    # Ensure left < right and top < bottom regardless of camera orientation
+    x_left  = min(outer_x, inner_x)
+    x_right = max(outer_x, inner_x)
+    y_top   = min(top_y, bottom_y)
+    y_bot   = max(top_y, bottom_y)
 
-    # ── Left eye ──────────────────────────────────────────────────────────────
-    lx_iris, ly_iris = _iris_centre(landmarks, IRIS_LEFT_INDICES)
+    return EyeBounds(x_left=x_left, x_right=x_right,
+                     y_top=y_top, y_bottom=y_bot)
 
-    l_inner = landmarks[EAR_LEFT_HORIZONTAL[0]]    # index 362 = inner corner
-    l_outer = landmarks[EAR_LEFT_HORIZONTAL[1]]    # index 263 = outer corner
-    l_eye_w = abs(l_inner.x - l_outer.x)
-    l_eye_h = abs(l_inner.y - l_outer.y) + 0.001
 
-    if l_eye_w < 0.001:
-        rel_lx = lx_iris
-        rel_ly = ly_iris
-    else:
-        rel_lx = (lx_iris - l_inner.x) / l_eye_w
-        rel_ly = (ly_iris - min(l_inner.y, l_outer.y)) / l_eye_h
+def _normalise_iris(
+    iris_x: float,
+    iris_y: float,
+    bounds: EyeBounds,
+) -> Tuple[float, float]:
+    """
+    Express iris position as a fraction of the eye bounding box.
 
-    # ── Average both eyes ─────────────────────────────────────────────────────
-    gaze_x = (rel_rx + rel_lx) / 2.0
-    gaze_y = (rel_ry + rel_ly) / 2.0
+        norm_x = (iris_x - bounds.x_left)  / bounds.width
+        norm_y = (iris_y - bounds.y_top)   / bounds.height
 
-    return gaze_x, gaze_y
+    Returns values in roughly [0, 1].  Values outside that range
+    occur at extreme gaze angles and are filtered by the validator.
+    """
+    norm_x = (iris_x - bounds.x_left)  / bounds.width
+    norm_y = (iris_y - bounds.y_top)   / bounds.height
+    return norm_x, norm_y
+
+
+# ── Validation ────────────────────────────────────────────────────────────────
+
+class GazeValidator:
+    """
+    Validates per-eye geometry before accepting a gaze sample.
+
+    Checks performed
+    ----------------
+    1. Eye width  >= GAZE_MIN_EYE_WIDTH   — rejects occluded/out-of-frame eyes
+    2. Eye height >= GAZE_MIN_EYE_HEIGHT  — rejects blinks and closed eyes
+       (important: this is a geometry check, NOT a blink-threshold check;
+       blink detection still runs independently via EAR in BlinkDetector)
+    3. Iris x and y within GAZE_IRIS_RANGE_MIN..GAZE_IRIS_RANGE_MAX — rejects
+       landmark failures that put the iris wildly outside the eye socket
+
+    All thresholds come from config.py and are tunable without code changes.
+    """
+
+    @staticmethod
+    def validate_eye(
+        iris_x: float,
+        iris_y: float,
+        bounds: EyeBounds,
+        label: str = "eye",
+    ) -> Tuple[bool, str]:
+        """
+        Validate one eye.  Returns (ok, reason_if_not_ok).
+        """
+        if bounds.width < GAZE_MIN_EYE_WIDTH:
+            return False, (
+                f"{label} width {bounds.width:.4f} < "
+                f"MIN_EYE_WIDTH {GAZE_MIN_EYE_WIDTH}"
+            )
+        if bounds.height < GAZE_MIN_EYE_HEIGHT:
+            return False, (
+                f"{label} height {bounds.height:.4f} < "
+                f"MIN_EYE_HEIGHT {GAZE_MIN_EYE_HEIGHT}"
+            )
+        if not (GAZE_IRIS_RANGE_MIN <= iris_x <= GAZE_IRIS_RANGE_MAX):
+            return False, (
+                f"{label} iris_x {iris_x:.4f} out of range "
+                f"[{GAZE_IRIS_RANGE_MIN}, {GAZE_IRIS_RANGE_MAX}]"
+            )
+        if not (GAZE_IRIS_RANGE_MIN <= iris_y <= GAZE_IRIS_RANGE_MAX):
+            return False, (
+                f"{label} iris_y {iris_y:.4f} out of range "
+                f"[{GAZE_IRIS_RANGE_MIN}, {GAZE_IRIS_RANGE_MAX}]"
+            )
+        return True, ""
+
+
+# ── Public gaze API ───────────────────────────────────────────────────────────
+
+def compute_gaze(landmarks) -> GazeDebugInfo:
+    """
+    Compute gaze from MediaPipe face landmarks, returning a full
+    GazeDebugInfo bundle that includes per-eye diagnostics.
+
+    Coordinate contract
+    ───────────────────
+    averaged_gaze (when tracking_valid=True) is in user-perspective
+    canonical coordinates:
+
+        x = 0.0  →  user's left   (cursor should move left)
+        x = 1.0  →  user's right  (cursor should move right)
+        y = 0.0  →  top of screen
+        y = 1.0  →  bottom of screen
+
+    The horizontal mirror (camera sees left↔right flipped relative to
+    the user) is corrected HERE so the rest of the pipeline is
+    coordinate-system agnostic.
+
+    Returns
+    -------
+    GazeDebugInfo
+        Always returned.  Check .tracking_valid before using .averaged_gaze.
+        When tracking_valid is False, .averaged_gaze is None and
+        .validation_reason explains why.
+    """
+    # ── Build eye bounding boxes ──────────────────────────────────────────────
+    right_bounds = _build_eye_bounds(
+        landmarks,
+        horizontal    = EAR_RIGHT_HORIZONTAL,   # (33=outer, 133=inner)
+        eyelid_top    = GAZE_RIGHT_EYELID_TOP,
+        eyelid_bottom = GAZE_RIGHT_EYELID_BOTTOM,
+    )
+    left_bounds = _build_eye_bounds(
+        landmarks,
+        horizontal    = EAR_LEFT_HORIZONTAL,    # (362=inner, 263=outer)
+        eyelid_top    = GAZE_LEFT_EYELID_TOP,
+        eyelid_bottom = GAZE_LEFT_EYELID_BOTTOM,
+    )
+
+    # ── Iris centres (camera space) ───────────────────────────────────────────
+    r_iris_x, r_iris_y = _iris_centre(landmarks, IRIS_RIGHT_INDICES)
+    l_iris_x, l_iris_y = _iris_centre(landmarks, IRIS_LEFT_INDICES)
+
+    # ── Normalise iris within eye bounding box ────────────────────────────────
+    r_norm_x, r_norm_y = _normalise_iris(r_iris_x, r_iris_y, right_bounds)
+    l_norm_x, l_norm_y = _normalise_iris(l_iris_x, l_iris_y, left_bounds)
+
+    # ── Validate each eye independently ──────────────────────────────────────
+    r_ok, r_reason = GazeValidator.validate_eye(
+        r_norm_x, r_norm_y, right_bounds, label="right eye"
+    )
+    l_ok, l_reason = GazeValidator.validate_eye(
+        l_norm_x, l_norm_y, left_bounds,  label="left eye"
+    )
+
+    if not r_ok or not l_ok:
+        reason = " | ".join(r for r in [r_reason, l_reason] if r)
+        return GazeDebugInfo(
+            left_iris         = (l_iris_x, l_iris_y),
+            right_iris        = (r_iris_x, r_iris_y),
+            left_eye_bounds   = left_bounds,
+            right_eye_bounds  = right_bounds,
+            left_gaze         = None,
+            right_gaze        = None,
+            averaged_gaze     = None,
+            tracking_valid    = False,
+            validation_reason = reason,
+        )
+
+    # ── Apply canonical coordinate system ────────────────────────────────────
+    #
+    # MediaPipe camera-space:    x increases LEFT → RIGHT from camera view
+    # User-perspective canonical: x=0 is user's left, x=1 is user's right
+    #
+    # Since the camera sees a mirror of the user:
+    #   canonical_x = 1.0 - normalised_x  (flips left↔right)
+    #   canonical_y = normalised_y         (top↓bottom is the same)
+    #
+    # This correction lives here so CalibrationManager, MouseController,
+    # and every other consumer sees user-perspective coordinates only.
+    r_gaze_x = 1.0 - r_norm_x
+    r_gaze_y = r_norm_y
+    l_gaze_x = 1.0 - l_norm_x
+    l_gaze_y = l_norm_y
+
+    avg_x = (r_gaze_x + l_gaze_x) / 2.0
+    avg_y = (r_gaze_y + l_gaze_y) / 2.0
+
+    return GazeDebugInfo(
+        left_iris         = (l_iris_x, l_iris_y),
+        right_iris        = (r_iris_x, r_iris_y),
+        left_eye_bounds   = left_bounds,
+        right_eye_bounds  = right_bounds,
+        left_gaze         = (l_gaze_x, l_gaze_y),
+        right_gaze        = (r_gaze_x, r_gaze_y),
+        averaged_gaze     = (avg_x, avg_y),
+        tracking_valid    = True,
+        validation_reason = "",
+    )
+
+
+def raw_gaze_point(landmarks) -> Optional[Tuple[float, float]]:
+    """
+    Convenience wrapper around compute_gaze() for the tracking loop.
+
+    Returns the averaged user-perspective gaze point, or None if
+    landmark validation failed.  Callers must check for None and
+    skip the frame when it is returned.
+    """
+    info = compute_gaze(landmarks)
+    return info.averaged_gaze  # None when tracking_valid is False
 
 
 def _iris_delta(a: Tuple[float, float], b: Tuple[float, float]) -> float:
-    """Euclidean distance between two normalised iris positions."""
+    """Euclidean distance between two normalised gaze positions."""
     return math.hypot(a[0] - b[0], a[1] - b[1])
 
 
@@ -212,11 +453,11 @@ class CalibrationManager:
         Falls back to a proportional mapping when not calibrated.
         """
         if self._matrix is None:
-            # Fallback: linear map from relative gaze space to screen.
-            # iris_x is relative iris position within eye socket (0=outer, 1=inner).
-            # We mirror X so that looking right → cursor moves right.
-            # Y is mapped directly (looking down → cursor moves down).
-            return (1.0 - iris_x) * self._sw, iris_y * self._sh
+            # Fallback: linear map from canonical gaze space → screen pixels.
+            # raw_gaze_point() already returns user-perspective coordinates:
+            #   x=0 → left, x=1 → right, y=0 → top, y=1 → bottom
+            # So we map directly — no mirroring needed here.
+            return iris_x * self._sw, iris_y * self._sh
 
         pt = np.array([iris_x, iris_y, 1.0], dtype=np.float64)
         result = self._matrix @ pt
@@ -315,32 +556,38 @@ class CalibrationManager:
                 result = landmarker.detect_for_video(mp_image, frame_ts_ms)
 
                 if result.face_landmarks:
-                    lms = result.face_landmarks[0]
-                    gaze = raw_gaze_point(lms)
+                    lms  = result.face_landmarks[0]
+                    gaze = raw_gaze_point(lms)   # None if validation failed
 
-                    if prev_gaze is None:
-                        # First frame — seed the stability check
+                    if gaze is None:
+                        # Landmark validation failed (blink, occlusion, etc.)
+                        # — reset streak but don't penalise as a "face lost"
+                        stable_streak = 0
+                        prev_gaze     = None
+                    elif prev_gaze is None:
+                        # First valid frame — seed the stability check
                         stable_streak = 1
+                        prev_gaze     = gaze
                     elif _iris_delta(gaze, prev_gaze) <= CALIBRATION_STABILITY_RADIUS:
                         stable_streak += 1
+                        prev_gaze      = gaze
                     else:
                         # Gaze drifted — restart streak, do not collect
                         stable_streak = 0
+                        prev_gaze     = gaze
                         log.debug(
                             "Gaze unstable at point %d (delta=%.4f) — resetting streak",
                             point_idx + 1,
                             _iris_delta(gaze, prev_gaze),
                         )
 
-                    prev_gaze = gaze
-
-                    # Only collect once gaze is confirmed stable
-                    if stable_streak >= CALIBRATION_STABILITY_MIN_FRAMES:
+                    # Only collect once gaze is confirmed valid and stable
+                    if gaze is not None and stable_streak >= CALIBRATION_STABILITY_MIN_FRAMES:
                         samples.append(gaze)
                 else:
-                    # Face lost — reset streak, do not advance
+                    # Face lost — reset streak
                     stable_streak = 0
-                    prev_gaze = None
+                    prev_gaze     = None
 
                 # ── Visual feedback ───────────────────────────────────────────
                 # Progress ring only fills when stable_streak is met and
