@@ -92,7 +92,7 @@ GAZE_LEFT_EYELID_BOTTOM = [374, 380, 373]
 # At 480 px height: MIN_EYE_HEIGHT 0.006 → ~3 px  (intentionally permissive;
 #   eye height is small even when fully open — tune after seeing debug data)
 GAZE_MIN_EYE_WIDTH  = 0.02    # horizontal extent of the eye socket
-GAZE_MIN_EYE_HEIGHT = 0.006   # vertical extent (top eyelid → bottom eyelid)
+GAZE_MIN_EYE_HEIGHT = 0.012   # vertical extent (top eyelid → bottom eyelid)
 
 # Iris coordinate sanity range — iris should sit within the eye socket.
 # Values outside [-0.1, 1.1] indicate a tracking failure.

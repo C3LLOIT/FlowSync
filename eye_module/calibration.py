@@ -202,8 +202,12 @@ def _normalise_iris(
     Returns values in roughly [0, 1].  Values outside that range
     occur at extreme gaze angles and are filtered by the validator.
     """
-    norm_x = (iris_x - bounds.x_left)  / bounds.width
-    norm_y = (iris_y - bounds.y_top)   / bounds.height
+    # Prevent division by zero when eyes are closed or geometry is distorted
+    width = max(bounds.width, 0.001)
+    height = max(bounds.height, 0.001)
+
+    norm_x = (iris_x - bounds.x_left)  / width
+    norm_y = (iris_y - bounds.y_top)   / height
     return norm_x, norm_y
 
 
@@ -457,7 +461,20 @@ class CalibrationManager:
             # raw_gaze_point() already returns user-perspective coordinates:
             #   x=0 → left, x=1 → right, y=0 → top, y=1 → bottom
             # So we map directly — no mirroring needed here.
-            return iris_x * self._sw, iris_y * self._sh
+
+            # The raw gaze coordinates typically only move in a narrow central range (e.g. 0.35 to 0.65).
+            # If we map the full 0-1 range to the screen, the cursor is hypersensitive and will
+            # frequently clip to the bottom/right edges of the screen due to minor head movement.
+            # Here we apply a basic scale and center transform to make uncalibrated tracking usable.
+            scale = 3.0
+            scaled_x = (iris_x - 0.5) * scale + 0.5
+            scaled_y = (iris_y - 0.5) * scale + 0.5
+
+            # Clamp to [0, 1] so it doesn't overshoot the screen drastically
+            scaled_x = max(0.0, min(1.0, scaled_x))
+            scaled_y = max(0.0, min(1.0, scaled_y))
+
+            return scaled_x * self._sw, scaled_y * self._sh
 
         pt = np.array([iris_x, iris_y, 1.0], dtype=np.float64)
         result = self._matrix @ pt
