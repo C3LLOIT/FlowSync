@@ -422,35 +422,22 @@ class EyeTracker:
     # ── Internal: camera ──────────────────────────────────────────────────────
 
     def _open_camera(self) -> cv2.VideoCapture:
-        # On Windows CAP_DSHOW opens significantly faster than the default
-        # MSMF backend (~0.3s vs ~3-5s). We try CAP_DSHOW first on all
-        # platforms (it is a no-op on Linux/macOS) and fall back once.
-        import platform
-        backend = cv2.CAP_DSHOW if platform.system() == "Windows" else cv2.CAP_ANY
-        cap = cv2.VideoCapture(self._cam_index, backend)
+        cap = cv2.VideoCapture(self._cam_index, cv2.CAP_DSHOW)
         if not cap.isOpened():
+            # Fallback: try without backend hint
             cap = cv2.VideoCapture(self._cam_index)
         if not cap.isOpened():
             raise RuntimeError(
                 f"Cannot open camera at index {self._cam_index}. "
                 "Check your camera connection and index."
             )
-        # Set resolution and FPS. Do NOT set FOURCC before these — some
-        # drivers reset all props when FOURCC is changed, causing extra delay.
         cap.set(cv2.CAP_PROP_FRAME_WIDTH,  CAMERA_WIDTH)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
         cap.set(cv2.CAP_PROP_FPS,          CAMERA_FPS)
-        # Minimal internal buffer: reduces latency and avoids stale frames
-        # appearing after a pause (e.g. while MediaPipe is initialising).
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        # Warm-up: drain the first few frames so MediaPipe gets a clean image
-        # immediately rather than a dark/blurry startup frame.
-        for _ in range(3):
-            cap.read()
+        cap.set(cv2.CAP_PROP_BUFFERSIZE,   1)
         log.info(
-            "Camera opened: index=%d, %dx%d @ %d fps (backend=%s)",
+            "Camera opened: index=%d, %dx%d @ %d fps",
             self._cam_index, CAMERA_WIDTH, CAMERA_HEIGHT, CAMERA_FPS,
-            "CAP_DSHOW" if backend == cv2.CAP_DSHOW else "default",
         )
         return cap
 
