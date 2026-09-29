@@ -59,8 +59,9 @@ def run():
         for hand_index, hand in enumerate(processed_landmarks):
 
             handedness = "hand_" + str(hand_index)
-            if result and getattr(result, "handedness", None):
-                categories = result.handedness[hand_index]
+            handedness_results = getattr(result, "handedness", None)
+            if handedness_results and hand_index < len(handedness_results):
+                categories = handedness_results[hand_index]
                 if categories:
                     handedness = categories[0].category_name or handedness
 

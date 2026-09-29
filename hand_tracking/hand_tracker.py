@@ -1,4 +1,5 @@
 import os
+import time
 import urllib.request
 import zipfile
 
@@ -45,23 +46,25 @@ class HandTracker:
             base_options=base_options,
             running_mode=vision.RunningMode.VIDEO,
             num_hands=2,
-            min_hand_detection_confidence=0.4,
-            min_hand_presence_confidence=0.4,
+            min_hand_detection_confidence=0.50,
+            min_hand_presence_confidence=0.50,
             min_tracking_confidence=0.35,
         )
 
         self.detector = vision.HandLandmarker.create_from_options(options)
-        self.frame_count = 0
-        self.fps = 30  # Match camera.py setting
+        self.last_timestamp_ms = -1
 
     def detect(self, frame):
         detection_frame = self._prepare_frame(frame)
         rgb_frame = cv2.cvtColor(detection_frame, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
 
-        # Convert frame count to milliseconds timestamp
-        timestamp_ms = int(self.frame_count * 1000 / self.fps)
-        self.frame_count += 1
+        # VIDEO mode requires strictly increasing timestamps. Use wall-clock
+        # time so camera stalls or a different capture FPS cannot duplicate one.
+        timestamp_ms = time.monotonic_ns() // 1_000_000
+        if timestamp_ms <= self.last_timestamp_ms:
+            timestamp_ms = self.last_timestamp_ms + 1
+        self.last_timestamp_ms = timestamp_ms
 
         return self.detector.detect_for_video(mp_image, timestamp_ms)
 
